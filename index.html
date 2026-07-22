@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#2b2b2b">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-180.png">
+<title>PDF Book Viewer</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { height:100%; background:#2b2b2b; overflow:hidden; font-family:system-ui,sans-serif; }
+  #stage {
+    position:fixed; inset:0;
+    display:flex; align-items:center; justify-content:center;
+    perspective:2500px; /* めくりの立体感 */
+  }
+  #book {
+    position:relative;
+    transform-style:preserve-3d;
+    box-shadow:0 20px 60px rgba(0,0,0,.6);
+  }
+  .page {
+    position:absolute; top:0; left:0;
+    background:#fff;
+    transform-origin:left center; /* 左綴じの背表紙を軸に回転 */
+    transform-style:preserve-3d;
+    backface-visibility:hidden;
+    transition:transform .6s cubic-bezier(.3,.7,.3,1);
+    will-change:transform;
+    box-shadow:inset 0 0 30px rgba(0,0,0,.08);
+  }
+  .page canvas { display:block; width:100%; height:100%; }
+  .page.flipped { transform:rotateY(-180deg); }
+  /* ページの厚みを感じさせる影 */
+  .page::after {
+    content:""; position:absolute; inset:0;
+    background:linear-gradient(to right, rgba(0,0,0,.12), transparent 12%);
+    pointer-events:none;
+  }
+  #ui {
+    position:fixed; bottom:calc(16px + env(safe-area-inset-bottom));
+    left:50%; transform:translateX(-50%);
+    display:flex; gap:12px; align-items:center;
+    background:rgba(0,0,0,.55); backdrop-filter:blur(10px);
+    padding:10px 16px; border-radius:999px; color:#fff;
+    font-size:14px; user-select:none;
+  }
+  #ui button {
+    background:#fff; color:#222; border:none; border-radius:8px;
+    padding:8px 14px; font-size:16px; cursor:pointer;
+  }
+  #ui button:disabled { opacity:.35; }
+  #loader {
+    position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+    color:#fff; font-size:15px;
+  }
+  #filepick {
+    position:fixed; top:calc(12px + env(safe-area-inset-top)); right:12px;
+    color:#fff; font-size:13px;
+  }
+</style>
+</head>
+<body>
+  <div id="stage"><div id="book"></div></div>
+  <div id="loader">PDFを読み込み中…</div>
+
+  <div id="filepick">
+    <label style="background:rgba(0,0,0,.55);padding:8px 12px;border-radius:8px;cursor:pointer;">
+      ファイルを開く
+      <input type="file" accept="application/pdf" id="file" hidden>
+    </label>
+  </div>
+
+  <div id="ui">
+    <button id="prev">◀</button>
+    <span id="pageInfo">- / -</span>
+    <button id="next">▶</button>
+  </div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs" type="module"></script>
+<script type="module">
+import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs';
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs';
+
+const book = document.getElementById('book');
+const loader = document.getElementById('loader');
+const pageInfo = document.getElementById('pageInfo');
+const prevBtn = document.getElementById('prev');
+const nextBtn = document.getElementById('next');
+
+let pdfDoc = null;
+let current = 0;      // 現在開いているページ（0始まり、右ページ）
+let total = 0;
+let pageEls = [];     // .page 要素の配列
+const SCALE = window.devicePixelRatio || 2;
+
+// PDFを読み込んで全ページを描画
+async function loadPDF(src) {
+  loader.style.display = 'flex';
+  book.innerHTML = '';
+  pageEls = [];
+
+  pdfDoc = await pdfjsLib.getDocument(src).promise;
+  total = pdfDoc.numPages;
+
+  // 1ページ目のサイズから本のサイズを決める
+  const p1 = await pdfDoc.getPage(1);
+  const vp = p1.getViewport({ scale: 1 });
+  const maxH = window.innerHeight * 0.82;
+  const displayScale = maxH / vp.height;
+  const w = vp.width * displayScale;
+  const h = vp.height * displayScale;
+  book.style.width = w + 'px';
+  book.style.height = h + 'px';
+
+  // 各ページのDOM生成 + 描画
+  for (let i = 1; i <= total; i++) {
+    const el = document.createElement('div');
+    el.className = 'page';
+    el.style.width = w + 'px';
+    el.style.height = h + 'px';
+    el.style.zIndex = total - i; // 手前ほど大きいz
+    book.appendChild(el);
+    pageEls.push(el);
+    renderPage(i, el, displayScale); // 非同期で順次描画
+  }
+
+  current = 0;
+  update();
+  loader.style.display = 'none';
+}
+
+async function renderPage(num, el, displayScale) {
+  const page = await pdfDoc.getPage(num);
+  const vp = page.getViewport({ scale: displayScale * SCALE });
+  const canvas = document.createElement('canvas');
+  canvas.width = vp.width;
+  canvas.height = vp.height;
+  el.appendChild(canvas);
+  await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+}
+
+function update() {
+  pageEls.forEach((el, i) => {
+    if (i < current) el.classList.add('flipped');
+    else el.classList.remove('flipped');
+  });
+  pageInfo.textContent = `${current + 1} / ${total}`;
+  prevBtn.disabled = current <= 0;
+  nextBtn.disabled = current >= total - 1;
+}
+
+function next() { if (current < total - 1) { current++; update(); } }
+function prev() { if (current > 0) { current--; update(); } }
+
+nextBtn.onclick = next;
+prevBtn.onclick = prev;
+
+// タップで左右めくり（画面の左半分=戻る, 右半分=進む）
+document.getElementById('stage').addEventListener('click', e => {
+  if (e.clientX > window.innerWidth / 2) next(); else prev();
+});
+
+// スワイプ対応
+let startX = null;
+document.addEventListener('touchstart', e => startX = e.touches[0].clientX, {passive:true});
+document.addEventListener('touchend', e => {
+  if (startX === null) return;
+  const dx = e.changedTouches[0].clientX - startX;
+  if (Math.abs(dx) > 40) { dx < 0 ? next() : prev(); }
+  startX = null;
+});
+
+// ファイル選択で開く
+document.getElementById('file').addEventListener('change', async e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const buf = await f.arrayBuffer();
+  loadPDF({ data: buf });
+});
+
+// 初期表示：同梱PDFがあればそれを開く（無ければファイル選択待ち）
+loadPDF('sample.pdf').catch(() => { loader.textContent = '「ファイルを開く」からPDFを選択'; });
+
+// Service Worker 登録
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+</script>
+</body>
+</html>
